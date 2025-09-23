@@ -4,7 +4,7 @@
 This repository is the official implementation of the paper “Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems”, which includes the training and evaluation framework for a C-VQ-VAE-based model using switching batch normalization (SBN), the training of an estimator to mitigate Doppler effects, and the training of a reinforcement learning agent to optimize the transmission processes. The codebase includes pre-training scripts, evaluation tools, and a GUI-based visualization module.
 
 ## Pretrained Model
-A pretrained model (`.h5` file) is available for download via Google Drive.  
+A pretrained model (`.h5` file) and saved data are available in Google Drive.  
 You can access it here: [Download from Google Drive](https://drive.google.com/drive/folders/1ypgiN-9nhdILdEaROc8Lr7wZtDzQ57Jq?usp=drive_link)
 
 After downloading, place the folder in your current directory before running the evaluation or training script.
