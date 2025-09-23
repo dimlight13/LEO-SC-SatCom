@@ -37,7 +37,7 @@ def modulate_psk(code_bits, M_mod, input_type='bit'):
         else:
             raise ValueError("Invalid input_type for PSK modulation.")
     elif M_mod == 4:
-        scale = np.sqrt(2.0)  # 정규화 상수: (1/sqrt(2)) 적용되므로 분모에 sqrt(2)
+        scale = np.sqrt(2.0)  
         if input_type == 'bit':
             code_bits = code_bits.astype(np.float32)
             if not np.all(np.isin(code_bits, [0, 1])):

@@ -1,28 +1,130 @@
 import numpy as np
 from numba import njit
 
-def dft_matrix(N):
-    W = np.empty((N, N), dtype=np.complex128)
-    for n in range(N):
-        for k in range(N):
-            W[n, k] = np.exp(-2j * np.pi * n * k / N)
-    return W
+def generate_delay_Doppler_channel_parameters(
+    N, M, f_c, delta_f, T, max_speed, profile='NTN-TDL-A'
+):
+    """
+    Generates channel parameters (channel coefficients, delay taps, Doppler taps)
+    based on 3GPP TR 38.811 Tables 6.9.2-1 to 6.9.2-4 for NTN-TDL-A/B/C/D at elevation 50°.
 
-def generate_delay_Doppler_channel_parameters(N, M, car_fre, delta_f, T, max_speed):
-    one_delay_tap = 1 / (M * delta_f)
-    one_doppler_tap = 1 / (N * T)
-    delays = np.array([0, 30, 150, 310, 370, 710, 1090, 1730, 2510]) * 1e-9
-    taps = len(delays)
-    delay_taps = np.rint(delays / one_delay_tap).astype(np.int64)
-    pdp = np.array([0, -1.5, -1.4, -3.6, -0.6, -9.1, -7.0, -12.0, -16.9])
-    pow_prof = 10 ** (pdp / 10)
-    pow_prof = pow_prof / np.sum(pow_prof)
-    chan_coef = np.sqrt(pow_prof) * (np.sqrt(1/2) * (np.random.randn(taps) + 1j * np.random.randn(taps)))
-    max_UE_speed = max_speed * (1000 / 3600)  # km/hr to m/s
-    Doppler_vel = (max_UE_speed * car_fre) / 299792458
-    max_Doppler_tap = Doppler_vel / one_doppler_tap
-    Doppler_taps = max_Doppler_tap * np.cos(2 * np.pi * np.random.rand(taps))
-    return chan_coef, delay_taps, Doppler_taps, taps
+    In this version, a single 'bulk' Doppler offset is applied to all taps, as
+    typically assumed in TR 38.811 for LEO satellite channels.
+
+    Parameters:
+        N         : Number of OFDM symbols (affects Doppler resolution)
+        M         : Number of subcarriers (affects delay resolution)
+        f_c       : Carrier frequency in Hz (e.g., 2e9 for 2 GHz)
+        delta_f   : Subcarrier spacing in Hz (e.g., 15e3)
+        T         : OFDM symbol duration in seconds (including CP)
+        max_speed : Maximum relative speed in km/h (LEO or user speed)
+        profile   : 'NTN-TDL-A', 'NTN-TDL-B', 'NTN-TDL-C', or 'NTN-TDL-D'
+
+    Returns:
+        chan_coef    : complex channel coefficients for each tap (numpy array)
+        delay_taps   : integer array of delay-tap indices
+        doppler_taps : integer array of Doppler-tap indices (all identical if truly bulk)
+        taps         : number of channel taps
+    """
+
+    # -------------------------------------------------------
+    # 1) Define delay (µs) and power (dB) from TR 38.811 at 50° elevation
+    # -------------------------------------------------------
+    if profile == 'NTN-TDL-A':
+        # Table 6.9.2-1: 3 taps, all Rayleigh
+        # Normalized Delay (µs), Power (dB)
+        delays_us = np.array([0, 1.0811, 2.8416])
+        pdp_db    = np.array([0, -4.675, -6.482])
+        K_dB = None
+    elif profile == 'NTN-TDL-B':
+        # Table 6.9.2-2: 4 taps, all Rayleigh
+        delays_us = np.array([0, 0.7249, 0.7410, 5.7392])
+        pdp_db    = np.array([0, -1.973, -4.332, -11.914])
+        K_dB = None
+    elif profile == 'NTN-TDL-C':
+        # Table 6.9.2-3: 2 taps; first factor is LOS path with K-factor=10.224 dB
+        delays_us = np.array([0, 0, 14.8124])
+        pdp_db    = np.array([-0.394, -10.618, -23.373])
+        # Note from Table: first tap has K=10.224 dB
+        K_dB = 10.224
+    elif profile == 'NTN-TDL-D':
+        # Table 6.9.2-4: 3 taps; first factor is LOS path with K-factor=11.707 dB
+        delays_us = np.array([0, 0, 0.5596, 7.3340])
+        pdp_db    = np.array([-0.284, -11.991, -9.887, -16.771])
+        # Note from Table: first tap has K=11.707 dB
+        K_dB = 11.707
+    else:
+        raise ValueError("profile must be one of 'NTN-TDL-A', 'NTN-TDL-B', 'NTN-TDL-C', 'NTN-TDL-D'")
+
+    # -------------------------------------------------------
+    # 2) Convert from µs to seconds, compute total # of taps
+    # -------------------------------------------------------
+    delays_s = delays_us * 1e-6
+    taps     = len(delays_s)
+
+    # -------------------------------------------------------
+    # 3) Compute delay indices for your simulation grid
+    #    - "one_delay_tap" is the time resolution for each discrete delay bin
+    # -------------------------------------------------------
+    one_delay_tap = 1 / (M * delta_f)  # seconds per delay bin
+    delay_taps = np.rint(delays_s / one_delay_tap).astype(int)
+
+    # -------------------------------------------------------
+    # 4) Convert dB powers -> linear scale, then normalize so sum = 1
+    # -------------------------------------------------------
+    p_lin = 10 ** (pdp_db / 10)
+    p_sum = np.sum(p_lin)
+    p_lin_norm = p_lin / p_sum
+
+    # -------------------------------------------------------
+    # 5) Generate channel coefficients for each tap
+    #    - TDL-C/D: first tap is LOS (Ricean), others are Rayleigh
+    #    - TDL-A/B: all taps are Rayleigh
+    # -------------------------------------------------------
+    chan_coef = np.zeros(taps, dtype=complex)
+
+    if K_dB is not None:
+        # LOS scenario: the first tap has a K-factor
+        K_lin = 10 ** (K_dB / 10)  # linear K-factor
+        # Power allocated to the first tap
+        p_first = p_lin_norm[0]
+        # For a Ricean tap with total average power p_first:
+        #  - LOS amplitude^2 = p_first * (K_lin/(K_lin+1))
+        #  - NLOS average power = p_first * (1/(K_lin+1))
+        los_amp = np.sqrt(p_first * K_lin / (K_lin + 1))
+        nlos_std = np.sqrt(p_first / (K_lin + 1) / 2)
+
+        # LOS tap (tap 0)
+        # The LOS component is a deterministic amplitude with random phase:
+        phase_0 = np.random.uniform(0, 2*np.pi)
+        los_comp = los_amp * np.exp(1j * phase_0)
+        # The NLOS portion is Rayleigh:
+        nlos_comp = nlos_std * (np.random.randn() + 1j*np.random.randn())
+        chan_coef[0] = los_comp + nlos_comp
+
+        for i in range(1, taps):
+            rayleigh_std = np.sqrt(p_lin_norm[i] / 2)
+            chan_coef[i] = rayleigh_std * (np.random.randn() + 1j*np.random.randn())
+    else:
+        for i in range(taps):
+            rayleigh_std = np.sqrt(p_lin_norm[i] / 2)
+            chan_coef[i] = rayleigh_std * (np.random.randn() + 1j*np.random.randn())
+
+    max_speed_mps = max_speed * 1000 / 3600  # km/h -> m/s
+    max_doppler_shift = (max_speed_mps * f_c) / 299792458.0  # in Hz
+    doppler_res = 1 / (N * T)
+
+    # version A:bulk Doppler shift for all taps (non-terrestrial channels)
+    angle = np.random.uniform(0, 2*np.pi)
+    bulk_doppler_shift = max_doppler_shift * np.cos(angle)
+    doppler_shifts = np.full(taps, bulk_doppler_shift, dtype=float)
+    doppler_taps = np.rint(doppler_shifts / doppler_res).astype(int)
+
+    # version B:  random Doppler shifts for each tap (terrestrial channels)
+    # max_Doppler_tap = max_doppler_shift / doppler_res
+    # doppler_taps = max_Doppler_tap * np.cos(2 * np.pi * np.random.rand(taps)) # Doppler taps using Jake's spectrum
+    # doppler_taps = np.rint(doppler_taps).astype(int)
+    return chan_coef, delay_taps, doppler_taps, taps
 
 @njit
 def gen_discrete_time_channel(N, M, P, delay_taps, Doppler_taps, chan_coef):
@@ -64,7 +166,7 @@ def generate_time_frequency_channel_zp(N, M, gs, L_set):
 
     Gn = np.zeros((M, M), dtype=np.complex128)
     for n in range(N):
-        Gn.fill(0)  # 각 시간 슬롯마다 초기화
+        Gn.fill(0) 
         for m in range(M):
             for l in L_set:
                 if m >= l:
@@ -88,7 +190,6 @@ def compute_d_m_tilda(N, M, M_prime, L_set, nu_ml_tilda):
     for m in range(M_prime):
         for i in range(L_set.shape[0]):
             l = L_set[i]
-            # nu_ml_tilda[:, m+l, l]의 절댓값 제곱을 누적
             d_m_tilda[:, m] += np.abs(nu_ml_tilda[:, m + l, l])**2
     return d_m_tilda
 
@@ -188,114 +289,11 @@ def mrc_delay_time_detector(N, M, M_data, M_mod, no, data_grid, r, H_tf, nu_ml_t
     est_bits = np.reshape(est_bits, (N_bits_perfram, 1), order='F')
     return est_bits, ite, x_data
 
-def mrc_low_complexity(N, M, M_mod, no, data_grid, r, H_tf, gs, L_set, omega, decision, init_estimate, n_ite, demod_fn, mod_fn):
-    Fn = dft_matrix(N)          # dft_matrix should generate an N×N DFT matrix
-    Fn = Fn / np.linalg.norm(Fn, 2)
-
-    N_syms_perfram = np.sum(data_grid > 0)
-    data_array = np.reshape(data_grid, (N * M,), order='F')
-    data_index = np.where(data_array > 0)[0]   # indices of data symbols (0-indexed)
-    data_location = np.reshape(data_grid, (N * M, 1), order='F')
-
-    M_bits = int(np.log2(M_mod))
-    N_bits_perfram = int(N_syms_perfram * M_bits)
-
-    Y_tilda = np.reshape(r, (M, N), order='F')
-    if init_estimate == 1:
-        Y_tf = np.fft.fft(Y_tilda, axis=0).T
-        X_tf = np.conj(H_tf) * Y_tf / (H_tf * np.conj(H_tf) + no)
-        X_est = np.fft.ifft(X_tf.T, axis=0) @ Fn
-        X_est = mod_fn(demod_fn(X_est, M_mod, output_type='int'), M_mod, input_type='int')
-        X_est = np.reshape(X_est, (M, N), order='F')
-
-        X_est = X_est * data_grid
-        X_tilda_est = X_est @ Fn.conj().T
-    else:
-        X_est = np.zeros((M, N), dtype=complex)
-        X_tilda_est = X_est @ Fn.conj().T
-    X_tilda_est = X_tilda_est * data_grid
-
-    error = np.zeros(n_ite)
-    s_est = np.reshape(X_tilda_est, (N * M,), order='F').astype(complex)
-    delta_r = r.copy().astype(complex)
-    d = np.zeros(N * M, dtype=float)
-
-    for q in range(N * M):
-        if data_location[q, 0] == 1:
-            for l in (L_set):  # l takes MATLAB-style indices (e.g., if L_set = [0,2] then l in [1,3])
-                d[q] += np.abs(gs[int(l), q + int(l)])**2
-
-    for q in range(N * M):
-        for l in (L_set + 1):
-            if (q + 1) >= l:  # converting to MATLAB 1-index
-                delta_r[q] = delta_r[q] - gs[int(l) - 1, q] * s_est[q - int(l) + 1]
-
-    for ite in range(n_ite):
-        delta_g = np.zeros(N * M, dtype=complex)
-        s_est_old = s_est.copy()
-        for q in data_index:
-            for l in L_set:
-                delta_g[q] += np.conj(gs[l, q + l]) * delta_r[q + l]
-            s_est[q] = s_est_old[q] + delta_g[q] / d[q]
-
-            for l in L_set:
-                delta_r[q + int(l)] = delta_r[q + int(l)] - \
-                    gs[int(l), q + int(l)] * (s_est[q] - s_est_old[q])
-
-        s_est_old = s_est.copy()
-
-        if decision == 1:
-            X_est = np.reshape(s_est, (M, N), order='F') @ Fn
-            temp = mod_fn(demod_fn(X_est, M_mod, output_type='int'), M_mod, input_type='int')
-            temp = np.reshape(temp, (M, N), order='F')
-            X_tilda_est = (temp * data_grid) @ Fn.conjugate().T
-            s_est = (1 - omega) * s_est + omega * np.reshape(X_tilda_est, (N * M,), order='F')
-
-        for q in data_index:
-            for l in (L_set):
-                delta_r[q + int(l)] = delta_r[q + int(l)] - \
-                    gs[int(l), q + int(l)] * (s_est[q] - s_est_old[q])
-
-        curr_error = np.linalg.norm(delta_r, 2)
-        error[ite] = curr_error
-        if ite > 0:
-            if error[ite] >= error[ite - 1]:
-                ite = ite + 1  # count current iteration
-                break
-    else:
-        ite = n_ite  # if loop completes without break
-
-    if n_ite == 0:
-        ite = 0
-
-    X_tilda_est = np.reshape(s_est, (M, N), order='F')
-    X_est = X_tilda_est @ Fn
-    x_est = np.reshape(X_est, (N * M,), order='F')
-    x_data = x_est[data_index]
-    est_bits = demod_fn(x_data, M_mod, output_type='bit')
-    est_bits = np.reshape(est_bits, (N_bits_perfram, 1), order='F')
-    return est_bits, ite, x_data
-
-def TF_single_tap_equalizer(N, M, M_mod, noise_var, data_grid, Y, H_tf, demod_fn):
-    Fn = dft_matrix(N)
-    Fn = Fn / np.linalg.norm(Fn, 2)
-
-    N_syms_perfram = np.sum(data_grid > 0)
-    data_array = np.reshape(data_grid, (N * M,), order='F')
-    data_index = np.where(data_array > 0)[0]
-
-    M_bits = int(np.log2(M_mod))
-    N_bits_perfram = N_syms_perfram * M_bits
-
-    Y_tf = np.fft.fft(Y @ Fn.conj().T, axis=0).T
-    X_tf = np.conj(H_tf) * Y_tf / (H_tf * np.conj(H_tf) + noise_var)
-    X_est = np.fft.ifft(X_tf.T, axis=0) @ Fn
-
-    x_est = np.reshape(X_est, (N * M,), order='F')
-    x_data = x_est[data_index]
-    est_bits = demod_fn(x_data, M_mod, output_type='bit')
-    est_bits = np.reshape(est_bits, (N_bits_perfram, 1), order='F')
-    return est_bits, x_data
+@njit
+def dft_matrix(N):
+    n = np.arange(N)
+    k = np.arange(N)
+    return np.exp(-2j * np.pi * np.outer(n, k) / N)
 
 def block_LMMSE_detector(N, M, M_mod, noise_var, data_grid, r, gs, L_set, demod_fn):
     Fn = dft_matrix(N)

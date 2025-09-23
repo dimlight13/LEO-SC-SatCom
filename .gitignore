@@ -1,0 +1,8 @@
+doppler_data/
+plot_results/
+post_model/
+rl_model/
+split_train/
+split_val/
+vqvae_images/
+vqvae_model/

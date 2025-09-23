@@ -1,0 +1,14 @@
+img_size: 32
+dataset_name: cifar10
+
+embedding_dim: 32
+num_embeddings: 512
+num_modulations: 5
+commitment_cost: 0.25
+decay: 0.99
+n_res_block: 2
+n_res_channel: 32
+num_samples: 4
+
+rl_rx_agent_model_dir: ./rl_model/cifar10
+pretrain_vqvae_model_dir: ./vqvae_model/cifar10

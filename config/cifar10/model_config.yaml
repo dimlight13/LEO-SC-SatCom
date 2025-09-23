@@ -1,0 +1,30 @@
+img_size: 32
+dataset_name: cifar10
+vqvae_max_epoch: 100
+rl_max_epoch: 200
+post_model_max_epoch: 50
+
+batch_size: 128
+post_batch_size: 32
+
+embedding_dim: 32
+num_embeddings: 512
+num_modulations: 5
+commitment_cost: 0.5
+decay: 0.99
+n_res_block: 2
+n_res_channel: 32
+save_interval: 10
+num_samples: 4
+
+vqvae_lr: 0.001
+post_lr: 0.0001
+actor_lr: 0.0001
+critic_lr: 0.0005
+
+rl_rx_agent_img_dir: ./rl_images/cifar10
+rl_rx_agent_model_dir: ./rl_model/cifar10
+pretrain_vqvae_model_dir: ./vqvae_model/cifar10
+pretrain_vqvae_img_dir: ./vqvae_images/cifar10
+post_model_dir: ./post_model/cifar10
+doppler_data_dir: ./doppler_data/cifar10
