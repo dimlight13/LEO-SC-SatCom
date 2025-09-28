@@ -1,6 +1,5 @@
 # LEO SC-SatCom
 
-## Overview
 This repository is the official implementation of the paper “Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems”, which includes the training and evaluation framework for a C-VQ-VAE-based model using switching batch normalization (SBN), the training of an estimator to mitigate Doppler effects, and the training of a reinforcement learning agent to optimize the transmission processes. The codebase includes pre-training scripts, evaluation tools, and a GUI-based visualization module.
 
 ## Pretrained Model
