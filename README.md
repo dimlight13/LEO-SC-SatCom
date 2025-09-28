@@ -67,5 +67,19 @@ python app_tk.py
 - **Execution**:  
   - After configuring all parameters, clicking **"Run Simulation"** will generate and display the **performance plots** automatically.  
 
+## Citation
+```bibtex
+@article{11180041,
+  author={Seon, Joonho and Lee, Seongwoo and Kim, Soo Hyun and Sun, Young Ghyu and Seo, Hyowoon and Kim, Dong In and Kim, Jin Young},
+  journal={IEEE Internet of Things Journal}, 
+  title={Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={1-1},
+  doi={10.1109/JIOT.2025.3614234}
+}
+```
+
 ## License
 This project is licensed under the MIT License
