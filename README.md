@@ -73,9 +73,10 @@ python app_tk.py
   journal={IEEE Internet of Things Journal}, 
   title={Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems}, 
   year={2025},
-  volume={},
-  number={},
-  pages={1-1},
+  volume={12},
+  number={24},
+  pages={52900-52912},
+  keywords={Modulation;Doppler shift;Low earth orbit satellites;Internet of Things;Signal to noise ratio;Satellites;Adaptation models;Semantic communication;Payloads;Costs;Internet of Things (IoT);low Earth orbit (LEO);reinforcement learning;satellite communications (SatCom);semantic communication (SC)},
   doi={10.1109/JIOT.2025.3614234}
 }
 ```
