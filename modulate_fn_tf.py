@@ -1,3 +1,7 @@
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 import tensorflow as tf
 
 def generate_qam_lut_tf(M):

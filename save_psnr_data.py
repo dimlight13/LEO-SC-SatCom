@@ -1,6 +1,17 @@
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 from utils import channel_effects_np, train_preprocessing, val_preprocessing, load_models_from_dir
 from models import VQVAE
-from Doppler_utils import generate_delay_Doppler_channel_parameters, generate_2d_data_grid, gen_discrete_time_channel, dft_matrix
+from Doppler_utils import (
+    apply_channel,
+    generate_delay_Doppler_channel_parameters,
+    generate_2d_data_grid,
+    gen_discrete_time_channel,
+    normalized_dft_matrix,
+    zp_data_grid,
+)
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -63,16 +74,10 @@ modulation_schemes = [
     {'modulation_order': 256, 'modulate_fn': modulate_qam, 'demodulate_fn': demodulate_qam},
 ]
 
-@numba.njit
-def block_LMMSE_detector(N, M, noise_var, data_grid, r, gs, L_set):
-    Fn = dft_matrix(N)
-    norm_Fn = np.linalg.norm(Fn, 2)
-    Fn = (Fn / np.float32(norm_Fn)).astype(np.complex128)
-
-    data_array = data_grid.T.ravel()
-    data_index = np.where(data_array > 0)[0]
-
+@numba.njit(cache=True)
+def block_LMMSE_detector(N, M, noise_var, r, gs, L_set, Fn, data_index):
     sn_block_est = np.zeros((M, N), dtype=np.complex128)
+    eye_m = np.eye(M, dtype=np.complex128)
 
     for n in range(N):
         Gn = np.zeros((M, M), dtype=np.complex128)
@@ -82,7 +87,8 @@ def block_LMMSE_detector(N, M, noise_var, data_grid, r, gs, L_set):
                     Gn[m, (m + 1) - int(l)] = gs[int(l) - 1, m + n * M]
         rn = r[n * M: (n + 1) * M]
         Rn = np.dot(np.conj(Gn).T, Gn)
-        sn_block_est[:, n] = np.linalg.inv(Rn + noise_var * np.eye(M)) @ (np.dot(np.conj(Gn).T, rn))
+        rhs = np.dot(np.conj(Gn).T, rn)
+        sn_block_est[:, n] = np.linalg.solve(Rn + noise_var * eye_m, rhs)
 
     X_tilda_est = sn_block_est
     X_est = np.dot(X_tilda_est, Fn)
@@ -110,10 +116,7 @@ def apply_doppler_channel(frame, snr_eval, modulation_index, profile):
     M = 64
     N = 16
 
-    length_ZP = M / 16
-    M_data = int(M - length_ZP)
-    data_grid = np.zeros((M, N), dtype=np.float32)
-    data_grid[:M_data, :] = 1
+    data_grid, data_index = zp_data_grid(N, M)
 
     snr_dB = snr_eval
 
@@ -121,9 +124,7 @@ def apply_doppler_channel(frame, snr_eval, modulation_index, profile):
     delta_f = 15e3
     T = 1 / delta_f
 
-    Fn = dft_matrix(N)
-    norm_Fn = np.linalg.norm(Fn, 2)
-    Fn = (Fn / np.float32(norm_Fn)).astype(np.complex128)
+    Fn = normalized_dft_matrix(N)
 
     eng_sqrt = 1 if M_mod == 2 else np.sqrt((M_mod - 1) / 6 * 4)
 
@@ -142,7 +143,7 @@ def apply_doppler_channel(frame, snr_eval, modulation_index, profile):
 
     chan_coef, delay_taps, Doppler_taps, taps = generate_delay_Doppler_channel_parameters(
         N, M, car_fre, delta_f, T, max_speed, profile)
-    L_set = np.unique(delay_taps)
+    L_set = np.unique(delay_taps).astype(np.int64)
 
     gs = gen_discrete_time_channel(N, M, taps, delay_taps, Doppler_taps, chan_coef)
 
@@ -153,15 +154,10 @@ def apply_doppler_channel(frame, snr_eval, modulation_index, profile):
     mu_fd = np.sum(norm_p * Doppler_taps)
     fd_rms = np.float32(np.sqrt(np.sum(norm_p * (Doppler_taps - mu_fd)**2)))
 
-    r = np.zeros(N * M, dtype=np.complex128)
-
-    for q in range(N * M):
-        for l in L_set:
-            if q >= l:
-                r[q] += gs[int(l), q] * s[q - int(l)]
+    r = apply_channel(N, M, gs, s, L_set)
 
     r = channel_effects_np(r, sigma_2)
-    eq_data = block_LMMSE_detector(N, M, sigma_2, data_grid, r, gs, L_set)
+    eq_data = block_LMMSE_detector(N, M, sigma_2, r, gs, L_set, Fn, data_index)
     return eq_data[:data.shape[0]], tau_rms, fd_rms
 
 @tf.function
@@ -255,12 +251,14 @@ def save_train_psnr(dataset, vqvae_model, args):
                             args[0],            
                             fn_output_signature=(
                                 tf.complex64, tf.float32, tf.float32
-                            )
+                            ),
+                            parallel_iterations=args.doppler_parallel_iterations
                         ),
                         (frames, snr_per_sample), 
                         fn_output_signature=(
                             tf.complex64, tf.float32, tf.float32
-                        )
+                        ),
+                        parallel_iterations=args.doppler_parallel_iterations
                     )
                     noisy_symbols = tf.reshape(noisy_frames, [batch_size, -1])[:, :sym_len]
 
@@ -379,12 +377,14 @@ def save_val_psnr(dataset, vqvae_model, args):
                             args[0],            
                             fn_output_signature=(
                                 tf.complex64, tf.float32, tf.float32
-                            )
+                            ),
+                            parallel_iterations=args.doppler_parallel_iterations
                         ),
                         (frames, snr_per_sample), 
                         fn_output_signature=(
                             tf.complex64, tf.float32, tf.float32
-                        )
+                        ),
+                        parallel_iterations=args.doppler_parallel_iterations
                     )
                     noisy_symbols = tf.reshape(noisy_frames, [batch_size, -1])[:, :sym_len]
 
@@ -496,6 +496,7 @@ if __name__ == "__main__":
     parser.add_argument("--commitment_cost", type=float, default=config.get('commitment_cost', 0.25))
     parser.add_argument("--decay", type=float, default=config.get('decay', 0.99))
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--doppler_parallel_iterations", type=int, default=config.get('doppler_parallel_iterations', 8))
     parser.add_argument("--embedding_dim", type=int, default=config.get('embedding_dim', 32))
     parser.add_argument("--n_res_block", type=int, default=config.get('n_res_block', 2))
     parser.add_argument("--vqvae_model_dir", type=str, default=config.get('pretrain_vqvae_model_dir', f'./vqvae_model/{args.dataset_name}'))

@@ -3,6 +3,10 @@ overview:
     train the tx agent using RL
 """
 
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 import tensorflow as tf
 from keras import layers
 from keras import optimizers
@@ -16,7 +20,6 @@ from utils import train_preprocessing, val_preprocessing, load_config
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-
 tf.random.set_seed(42)
 
 FEATURE_DESC = {
@@ -31,6 +34,8 @@ PPO_EPOCHS = 4
 CLIP_EPS   = 0.2
 ENT_COEF   = 0.01
 VF_COEF    = 0.5
+PSNR_THRESHOLD = 24.0
+REWARD_LAMBDA = 0.7
 
 modulation_schemes = [
     {'modulation_order': 2, 'modulate_fn': modulate_psk, 'demodulate_fn': demodulate_psk},
@@ -95,12 +100,12 @@ def performance_stats(rewards, psnrs):
 def resize(inputs, target_size):
     return tf.image.resize(inputs, target_size)
 
-def compute_reward(psnr, bits, psnr_t=24.0, lam=0.7):
-    p_succ = tf.sigmoid((psnr - psnr_t))
+def compute_reward(psnr, bits):
+    p_succ = tf.sigmoid((psnr - PSNR_THRESHOLD))
     se = (bits - 1.0) / 7.0
     thr = p_succ * se          # 0~1
     psnr_norm = tf.clip_by_value((psnr - 10.0) / 20.0, 0.0, 1.0)
-    return (1- lam) * thr + lam * psnr_norm
+    return (1 - REWARD_LAMBDA) * thr + REWARD_LAMBDA * psnr_norm
 
 @tf.function
 def collect_step(images, snr_inputs, psnr_all, tau_rms_all, fd_rms_all, actor, critic):
@@ -187,7 +192,7 @@ def train_agent(train_ds, actor, critic, actor_opt, critic_opt, args):
 
     dataset = tf.data.Dataset.from_tensor_slices(
         (S_img, S_snr, S_tau, S_fd, A_old, logp_old, returns, adv)
-    ).shuffle(1024).batch(args.batch_size)
+    ).shuffle(args.rollout_shuffle_buffer).batch(args.batch_size)
 
     for _ in range(PPO_EPOCHS):
         for (imgs, snr_, tau_, fd_, acts, lp_old, ret, adv_) in dataset:
@@ -321,6 +326,14 @@ def load_grouped_tfrecord(filename: str, batch_size: int = 32) -> tf.data.Datase
     return ds
 
 def main(args):
+    global PPO_EPOCHS, CLIP_EPS, ENT_COEF, VF_COEF, PSNR_THRESHOLD, REWARD_LAMBDA
+    PPO_EPOCHS = args.ppo_epochs
+    CLIP_EPS = args.clip_eps
+    ENT_COEF = args.ent_coef
+    VF_COEF = args.vf_coef
+    PSNR_THRESHOLD = args.reward_psnr_threshold
+    REWARD_LAMBDA = args.reward_lambda
+
     max_epoch = args.max_epoch
     vqvae_model_dir = args.vqvae_model_dir
     actor_lr = args.actor_lr
@@ -526,6 +539,13 @@ if __name__ == "__main__":
     parser.add_argument("--decay", type=float, default=config.get('decay', 0.99))
     parser.add_argument("--actor_lr", type=float, default=config.get('actor_lr', 1e-4))
     parser.add_argument("--critic_lr", type=float, default=config.get('critic_lr', 5e-4))
+    parser.add_argument("--ppo_epochs", type=int, default=config.get('ppo_epochs', PPO_EPOCHS))
+    parser.add_argument("--clip_eps", type=float, default=config.get('clip_eps', CLIP_EPS))
+    parser.add_argument("--ent_coef", type=float, default=config.get('ent_coef', ENT_COEF))
+    parser.add_argument("--vf_coef", type=float, default=config.get('vf_coef', VF_COEF))
+    parser.add_argument("--reward_psnr_threshold", type=float, default=config.get('reward_psnr_threshold', PSNR_THRESHOLD))
+    parser.add_argument("--reward_lambda", type=float, default=config.get('reward_lambda', REWARD_LAMBDA))
+    parser.add_argument("--rollout_shuffle_buffer", type=int, default=config.get('rollout_shuffle_buffer', 1024))
 
     parser.add_argument("--batch_size", type=int, default=config.get('batch_size', 128))
     parser.add_argument("--embedding_dim", type=int, default=config.get('embedding_dim', 32))

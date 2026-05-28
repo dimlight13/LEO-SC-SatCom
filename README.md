@@ -1,9 +1,10 @@
 # LEO SC-SatCom
 
+## Overview
 This repository is the official implementation of the paper “Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems”, which includes the training and evaluation framework for a C-VQ-VAE-based model using switching batch normalization (SBN), the training of an estimator to mitigate Doppler effects, and the training of a reinforcement learning agent to optimize the transmission processes. The codebase includes pre-training scripts, evaluation tools, and a GUI-based visualization module.
 
 ## Pretrained Model
-A pretrained model (`.h5` file) and saved data are available in Google Drive.  
+A pretrained model (.h5 file) and saved data are available in Google Drive.  
 You can access it here: [Download from Google Drive](https://drive.google.com/drive/folders/1ypgiN-9nhdILdEaROc8Lr7wZtDzQ57Jq?usp=drive_link)
 
 After downloading, place the folder in your current directory before running the evaluation or training script.
@@ -65,21 +66,6 @@ python app_tk.py
 
 - **Execution**:  
   - After configuring all parameters, clicking **"Run Simulation"** will generate and display the **performance plots** automatically.  
-
-## Citation
-```bibtex
-@article{11180041,
-  author={Seon, Joonho and Lee, Seongwoo and Kim, Soo Hyun and Sun, Young Ghyu and Seo, Hyowoon and Kim, Dong In and Kim, Jin Young},
-  journal={IEEE Internet of Things Journal}, 
-  title={Doppler-Adaptive Digital Semantic Communication for Low Earth Orbit Satellite Systems}, 
-  year={2025},
-  volume={12},
-  number={24},
-  pages={52900-52912},
-  keywords={Modulation;Doppler shift;Low earth orbit satellites;Internet of Things;Signal to noise ratio;Satellites;Adaptation models;Semantic communication;Payloads;Costs;Internet of Things (IoT);low Earth orbit (LEO);reinforcement learning;satellite communications (SatCom);semantic communication (SC)},
-  doi={10.1109/JIOT.2025.3614234}
-}
-```
 
 ## License
 This project is licensed under the MIT License

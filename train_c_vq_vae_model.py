@@ -1,5 +1,9 @@
 import argparse
 import os
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 import tensorflow as tf
 import keras
 from keras import optimizers

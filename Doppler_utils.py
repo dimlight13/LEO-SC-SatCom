@@ -1,4 +1,5 @@
 import numpy as np
+from functools import lru_cache
 from numba import njit
 
 def generate_delay_Doppler_channel_parameters(
@@ -126,20 +127,23 @@ def generate_delay_Doppler_channel_parameters(
     # doppler_taps = np.rint(doppler_taps).astype(int)
     return chan_coef, delay_taps, doppler_taps, taps
 
-@njit
+@njit(cache=True)
 def gen_discrete_time_channel(N, M, P, delay_taps, Doppler_taps, chan_coef):
-    z = np.exp(1j * 2 * np.pi / (N * M))
+    phase_step = 2 * np.pi / (N * M)
     l_max = np.max(delay_taps)
     gs = np.zeros((l_max + 1, N * M), dtype=np.complex128)
-    for q in range(N * M):
-        for i in range(P):
-            g_i = chan_coef[i]
-            l_i = delay_taps[i]
-            k_i = Doppler_taps[i]
-            gs[l_i, q] += g_i * (z ** (k_i * (q - l_i)))
+    for i in range(P):
+        g_i = chan_coef[i]
+        l_i = delay_taps[i]
+        k_i = Doppler_taps[i]
+        phase_inc = np.exp(1j * phase_step * k_i)
+        phase = np.exp(-1j * phase_step * k_i * l_i)
+        for q in range(N * M):
+            gs[l_i, q] += g_i * phase
+            phase *= phase_inc
     return gs
 
-@njit
+@njit(cache=True)
 def gen_delay_time_channel_vectors(N, M, l_max, gs):
     nu_ml_tilda = np.zeros((N, M, l_max + 1), dtype=np.complex128)
     for n in range(N):
@@ -148,7 +152,7 @@ def gen_delay_time_channel_vectors(N, M, l_max, gs):
                 nu_ml_tilda[n, m, l] = gs[l, m + n * M]
     return nu_ml_tilda
 
-@njit
+@njit(cache=True)
 def apply_channel(N, M, gs, s, L_set):
     r = np.zeros(N * M, dtype=np.complex128)
     for q in range(N * M):
@@ -184,7 +188,7 @@ def generate_2d_data_grid(N, M, x_data, data_grid):
     X = np.reshape(x_vec, (M, N), order='F')
     return X
 
-@njit
+@njit(cache=True)
 def compute_d_m_tilda(N, M, M_prime, L_set, nu_ml_tilda):
     d_m_tilda = np.zeros((N, M), dtype=np.complex128)
     for m in range(M_prime):
@@ -193,7 +197,7 @@ def compute_d_m_tilda(N, M, M_prime, L_set, nu_ml_tilda):
             d_m_tilda[:, m] += np.abs(nu_ml_tilda[:, m + l, l])**2
     return d_m_tilda
 
-@njit
+@njit(cache=True)
 def update_delta_y(N, M, L_set, nu_ml_tilda, x_m_tilda, delta_y_m_tilda):
     for m in range(M):
         for i in range(L_set.shape[0]):
@@ -289,16 +293,29 @@ def mrc_delay_time_detector(N, M, M_data, M_mod, no, data_grid, r, H_tf, nu_ml_t
     est_bits = np.reshape(est_bits, (N_bits_perfram, 1), order='F')
     return est_bits, ite, x_data
 
-@njit
+@njit(cache=True)
 def dft_matrix(N):
     n = np.arange(N)
     k = np.arange(N)
     return np.exp(-2j * np.pi * np.outer(n, k) / N)
 
-def block_LMMSE_detector(N, M, M_mod, noise_var, data_grid, r, gs, L_set, demod_fn):
+@lru_cache(maxsize=16)
+def normalized_dft_matrix(N):
     Fn = dft_matrix(N)
-    norm_Fn = np.linalg.norm(Fn, 2)
-    Fn = Fn / norm_Fn
+    return (Fn / np.linalg.norm(Fn, 2)).astype(np.complex128)
+
+@lru_cache(maxsize=16)
+def zp_data_grid(N, M):
+    length_zp = M / 16
+    m_data = int(M - length_zp)
+    data_grid = np.zeros((M, N), dtype=np.float32)
+    data_grid[:m_data, :] = 1
+    data_array = np.reshape(data_grid, (N * M,), order='F')
+    data_index = np.where(data_array > 0)[0].astype(np.int64)
+    return data_grid, data_index
+
+def block_LMMSE_detector(N, M, M_mod, noise_var, data_grid, r, gs, L_set, demod_fn):
+    Fn = normalized_dft_matrix(N)
 
     N_syms_perfram = np.sum(data_grid > 0)
     data_array = np.reshape(data_grid, (N * M,), order='F')
@@ -307,6 +324,7 @@ def block_LMMSE_detector(N, M, M_mod, noise_var, data_grid, r, gs, L_set, demod_
     N_bits_perfram = int(N_syms_perfram * M_bits)
 
     sn_block_est = np.zeros((M, N), dtype=complex)
+    eye_m = np.eye(M, dtype=complex)
 
     for n in range(N):
         Gn = np.zeros((M, M), dtype=complex)
@@ -316,7 +334,8 @@ def block_LMMSE_detector(N, M, M_mod, noise_var, data_grid, r, gs, L_set, demod_
                     Gn[m, (m + 1) - int(l)] = gs[int(l) - 1, m + n * M]
         rn = r[n * M: (n + 1) * M]
         Rn = np.dot(np.conj(Gn).T, Gn)
-        sn_block_est[:, n] = np.linalg.inv(Rn + noise_var * np.eye(M)) @ (np.dot(np.conj(Gn).T, rn))
+        rhs = np.dot(np.conj(Gn).T, rn)
+        sn_block_est[:, n] = np.linalg.solve(Rn + noise_var * eye_m, rhs)
 
     X_tilda_est = sn_block_est
     X_est = np.dot(X_tilda_est, Fn)

@@ -1,3 +1,7 @@
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 from utils import train_preprocessing, val_preprocessing, load_models_from_dir
 from models import VQVAE, PostLMMSENet, VGGFeatureMatchingLoss
 import tensorflow as tf

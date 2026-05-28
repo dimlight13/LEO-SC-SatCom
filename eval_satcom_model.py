@@ -1,5 +1,10 @@
 import argparse
 import os
+import time
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,6 +19,7 @@ from utils import channel_effects_np
 from Doppler_utils import dft_matrix, generate_2d_data_grid, generate_delay_Doppler_channel_parameters
 from Doppler_utils import mrc_delay_time_detector, block_LMMSE_detector, apply_channel
 from Doppler_utils import gen_discrete_time_channel, gen_delay_time_channel_vectors, generate_time_frequency_channel_zp
+from Doppler_utils import normalized_dft_matrix, zp_data_grid
 import tensorflow_probability as tfp
 from ldpc_fn_tf import LDPC5GEncoder, LDPC5GDecoder
 
@@ -26,6 +32,34 @@ BITS_PER_SYMBOL = {
     64: 6,  # 64-QAM
     256: 8  # 256-QAM
 }
+
+
+def load_eval_tfds_dataset(dataset_name, split, shuffle_files):
+    if dataset_name != 'eurosat':
+        return tfds.load(dataset_name, split=split, with_info=False, shuffle_files=shuffle_files)
+
+    try:
+        return tfds.load(dataset_name, split=split, with_info=False, shuffle_files=shuffle_files, try_gcs=True)
+    except Exception as first_err:
+        print(f"[WARN] TFDS default EuroSAT load failed: {first_err}")
+        print("[INFO] Retrying EuroSAT with HTTPS source and SSL verification disabled.")
+
+    try:
+        builder = tfds.builder(dataset_name)
+        if hasattr(builder, "builder_config") and hasattr(builder.builder_config, "download_url"):
+            download_url = builder.builder_config.download_url
+            if isinstance(download_url, str) and download_url.startswith("http://"):
+                builder.builder_config.download_url = download_url.replace("http://", "https://", 1)
+
+        download_config = tfds.download.DownloadConfig(verify_ssl=False)
+        builder.download_and_prepare(download_config=download_config)
+        return builder.as_dataset(split=split, shuffle_files=shuffle_files)
+    except Exception as second_err:
+        raise RuntimeError(
+            "Unable to load EuroSAT from TFDS. "
+            "The default TFDS URL is blocked (HTTP 403) and the HTTPS fallback also failed. "
+            "Please check network access or use --dataset_name cifar10."
+        ) from second_err
 
 def determine_modulation_index(args, EbNo, snr_boundaries):
     if args.modulation == 'TN_auto':
@@ -98,19 +132,15 @@ def apply_doppler_channel(frame, snr_eval, channel_type, modulate_fn, demodulate
     M = args.M_number
     N = args.N_number
 
-    length_ZP = M / 16
-    M_data = int(M - length_ZP)
-    data_grid = np.zeros((M, N), dtype=np.float32)
-    data_grid[:M_data, :] = 1
+    data_grid, data_index = zp_data_grid(N, M)
+    M_data = int(M - (M / 16))
 
     snr_dB = snr_eval[0].numpy()
     car_fre = 20e9
     delta_f = 15e3
     T = 1 / delta_f
 
-    Fn = dft_matrix(N)
-    norm_Fn = np.linalg.norm(Fn, 2)
-    Fn = Fn / norm_Fn
+    Fn = normalized_dft_matrix(N)
 
     eng_sqrt = 1 if M_mod == 2 else np.sqrt((M_mod - 1) / 6 * 4)
     SNR_linear = 10 ** (snr_dB / 10)
@@ -125,7 +155,7 @@ def apply_doppler_channel(frame, snr_eval, channel_type, modulate_fn, demodulate
     max_speed = 480  # km/hr
     chan_coef, delay_taps, Doppler_taps, taps = generate_delay_Doppler_channel_parameters(
         N, M, car_fre, delta_f, T, max_speed, args.profile)
-    L_set = np.unique(delay_taps)
+    L_set = np.unique(delay_taps).astype(np.int64)
 
     gs = gen_discrete_time_channel(N, M, taps, delay_taps, Doppler_taps, chan_coef)
 
@@ -139,7 +169,6 @@ def apply_doppler_channel(frame, snr_eval, channel_type, modulate_fn, demodulate
     Y = Y_tilda @ Fn
 
     y_vec = Y.T.reshape((N * M,), order='F')
-    data_index = np.nonzero(np.reshape(data_grid, (N * M,), order='F') > 0)[0]
     y_data = y_vec[data_index]
 
     nu_ml_tilda = gen_delay_time_channel_vectors(N, M, l_max, gs)
@@ -417,6 +446,145 @@ def load_grouped_tfrecord(filename: str, batch_size: int = 32):
     ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     return ds
 
+def measure_inference_speed(model, tx_agent, post_model, args, num_runs=100, warmup_runs=10):
+    """Measure inference speed for each component: encoder, decoder, post_equalizer, drl_agent."""
+    batch_size = args.batch_size
+    img_size = args.img_size
+    modulation_index = tf.constant(1, dtype=tf.int32)  # QPSK as representative
+
+    # --- Prepare dummy inputs ---
+    dummy_images = tf.random.normal([batch_size, img_size, img_size, 3])
+    dummy_agent_img = tf.random.normal([batch_size, 8, 8, 3])
+    dummy_snr = tf.zeros([batch_size, 1], dtype=tf.float32)
+    dummy_tau = tf.zeros([batch_size, 5], dtype=tf.float32)
+    dummy_fd = tf.zeros([batch_size, 5], dtype=tf.float32)
+    dummy_eq_batch = tf.random.normal([batch_size, args.input_bits_len], dtype=tf.float32)
+    dummy_mod_idx = tf.zeros([batch_size, 1], dtype=tf.int32)
+
+    # Run encode once (eager) to get shapes for decoder dummy input
+    enc_out, z_shape = model.encode(dummy_images, modulation_index, training=False)
+    quantized, code_indices, _ = model.quantize(enc_out, training=False)
+    dummy_mapping = model.vq_layer.embed_code(
+        code_indices, [z_shape[0], z_shape[1], z_shape[2], args.embedding_dim])
+
+    # --- Build @tf.function compiled inference functions ---
+    @tf.function(jit_compile=False)
+    def encode_fn(images, mod_idx):
+        enc_feat, z_s = model.encode(images, mod_idx, training=False)
+        q, indices, flat = model.quantize(enc_feat, training=False)
+        return q, indices, flat, z_s
+
+    @tf.function(jit_compile=False)
+    def decode_fn(mapping, mod_idx, z_s):
+        return model.decode(mapping, mod_idx, z_s, training=False)
+
+    @tf.function(jit_compile=False)
+    def post_eq_fn(eq_data, mod_idx_batch):
+        return post_model(eq_data, mod_idx_batch, training=False)
+
+    @tf.function(jit_compile=False)
+    def drl_agent_fn(agent_img, snr, tau, fd):
+        return tx_agent([agent_img, snr, tau, fd], training=False)
+
+    # --- Tracing (first call compiles the graph) ---
+    print("[INFO] Tracing @tf.function graphs ...")
+    _ = encode_fn(dummy_images, modulation_index)
+    _ = decode_fn(dummy_mapping, modulation_index, z_shape)
+    _ = post_eq_fn(dummy_eq_batch, dummy_mod_idx)
+    _ = drl_agent_fn(dummy_agent_img, dummy_snr, dummy_tau, dummy_fd)
+    print("[INFO] Tracing done. Starting warmup + measurement ...")
+
+    # =============================================
+    #  1) Encoder (encode + quantize)
+    # =============================================
+    for _ in range(warmup_runs):
+        encode_fn(dummy_images, modulation_index)
+
+    encoder_times = []
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        encode_fn(dummy_images, modulation_index)
+        t1 = time.perf_counter()
+        encoder_times.append(t1 - t0)
+
+    # =============================================
+    #  2) Decoder (decode)
+    # =============================================
+    for _ in range(warmup_runs):
+        decode_fn(dummy_mapping, modulation_index, z_shape)
+
+    decoder_times = []
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        decode_fn(dummy_mapping, modulation_index, z_shape)
+        t1 = time.perf_counter()
+        decoder_times.append(t1 - t0)
+
+    # =============================================
+    #  3) Post Equalizer (post_model)
+    # =============================================
+    for _ in range(warmup_runs):
+        post_eq_fn(dummy_eq_batch, dummy_mod_idx)
+
+    post_eq_times = []
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        post_eq_fn(dummy_eq_batch, dummy_mod_idx)
+        t1 = time.perf_counter()
+        post_eq_times.append(t1 - t0)
+
+    # =============================================
+    #  4) DRL Agent (tx_agent)
+    # =============================================
+    for _ in range(warmup_runs):
+        drl_agent_fn(dummy_agent_img, dummy_snr, dummy_tau, dummy_fd)
+
+    drl_agent_times = []
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        drl_agent_fn(dummy_agent_img, dummy_snr, dummy_tau, dummy_fd)
+        t1 = time.perf_counter()
+        drl_agent_times.append(t1 - t0)
+
+    # =============================================
+    #  Results
+    # =============================================
+    enc_mean = np.mean(encoder_times) * 1000
+    dec_mean = np.mean(decoder_times) * 1000
+    post_mean = np.mean(post_eq_times) * 1000
+    drl_mean = np.mean(drl_agent_times) * 1000
+    total_mean = enc_mean + dec_mean + post_mean + drl_mean
+
+    enc_std = np.std(encoder_times) * 1000
+    dec_std = np.std(decoder_times) * 1000
+    post_std = np.std(post_eq_times) * 1000
+    drl_std = np.std(drl_agent_times) * 1000
+
+    print("\n" + "=" * 65)
+    print(f"  Inference Speed Measurement  (batch_size={batch_size}, "
+          f"num_runs={num_runs})")
+    print("=" * 65)
+    print(f"  {'Component':<20} {'Mean (ms)':>10} {'Std (ms)':>10} {'Ratio':>8}")
+    print("-" * 65)
+    print(f"  {'Encoder':<20} {enc_mean:>10.3f} {enc_std:>10.3f} {enc_mean/total_mean*100:>7.1f}%")
+    print(f"  {'Decoder':<20} {dec_mean:>10.3f} {dec_std:>10.3f} {dec_mean/total_mean*100:>7.1f}%")
+    print(f"  {'Post Equalizer':<20} {post_mean:>10.3f} {post_std:>10.3f} {post_mean/total_mean*100:>7.1f}%")
+    print(f"  {'DRL Agent':<20} {drl_mean:>10.3f} {drl_std:>10.3f} {drl_mean/total_mean*100:>7.1f}%")
+    print("-" * 65)
+    print(f"  {'TOTAL':<20} {total_mean:>10.3f} {'':>10} {'100.0%':>8}")
+    print(f"  {'Throughput':<20} {1000.0/total_mean*batch_size:>10.1f} {'img/s':>10}")
+    print("=" * 65 + "\n")
+
+    return {
+        'encoder_ms': enc_mean,
+        'decoder_ms': dec_mean,
+        'post_equalizer_ms': post_mean,
+        'drl_agent_ms': drl_mean,
+        'total_ms': total_mean,
+        'throughput_img_per_s': 1000.0 / total_mean * batch_size,
+    }
+
+
 def main_with_args(args):
     if not hasattr(args, "save_model_dir"):
         config = load_config(f"config/{args.dataset_name}/evaluation_config.yaml")
@@ -443,9 +611,9 @@ def main_with_args(args):
     )
 
     if args.dataset_name == 'cifar10':
-        x_test = tfds.load(args.dataset_name, split="test", with_info=False, shuffle_files=False)
+        x_test = load_eval_tfds_dataset(args.dataset_name, split="test", shuffle_files=False)
     elif args.dataset_name == 'eurosat':
-        x_test = tfds.load(args.dataset_name, split="train[90%:]", with_info=False, shuffle_files=True)
+        x_test = load_eval_tfds_dataset(args.dataset_name, split="train[90%:]", shuffle_files=True)
 
     test_dataset = (x_test
             .map(lambda x: val_preprocessing(x, img_size), num_parallel_calls=tf.data.AUTOTUNE)
@@ -475,15 +643,22 @@ def main_with_args(args):
     post_model.load_weights(os.path.join(post_model_dir, 'post_model.h5'))
 
     model = load_models_from_dir(save_model_dir, model)
+
+    if getattr(args, 'measure_speed', False):
+        measure_inference_speed(model, tx_agent, post_model, args,
+                                num_runs=args.speed_num_runs,
+                                warmup_runs=args.speed_warmup_runs)
+        return
+
     test_psnr(test_dataset, model, tx_agent, post_model, args, args.channel_type)
 
 def main_cli():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default='eurosat', help="Name of the dataset to use", choices=['cifar10', 'eurosat'])
-    args = parser.parse_args()
-    
+    args, _ = parser.parse_known_args()
+
     parser.add_argument("--config", type=str, default=f"config/{args.dataset_name}/model_config.yaml", help="Path to the config file")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     config = load_config(args.config)
 
     parser.add_argument("--save_model_dir", type=str, default=config.get('pretrain_vqvae_model_dir', f'./vqvae_model/{args.dataset_name}'), help="Directory to save trained model")
@@ -515,6 +690,12 @@ def main_cli():
                         choices=['lmmse', 'mrc', 'none'],
                         default='lmmse', help="Doppler compensation method")
     parser.add_argument("--profile", type=str, choices=['NTN-TDL-A', 'NTN-TDL-B', 'NTN-TDL-C', 'NTN-TDL-D'], default='NTN-TDL-D')
+    parser.add_argument("--measure_speed", action="store_true", default=False,
+                        help="Measure inference speed for each component and exit")
+    parser.add_argument("--speed_num_runs", type=int, default=100,
+                        help="Number of runs for speed measurement")
+    parser.add_argument("--speed_warmup_runs", type=int, default=10,
+                        help="Number of warmup runs before speed measurement")
     args = parser.parse_args()
     main_with_args(args)
 

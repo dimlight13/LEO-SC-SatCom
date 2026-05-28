@@ -6,3 +6,5 @@ split_train/
 split_val/
 vqvae_images/
 vqvae_model/
+.gitignore/
+__pycache__/

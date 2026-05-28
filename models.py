@@ -1,3 +1,7 @@
+from gpu_config import configure_cuda_visible_devices
+
+configure_cuda_visible_devices()
+
 import tensorflow as tf
 from keras import layers, Model, losses
 from keras import applications
@@ -422,10 +426,10 @@ class BasicBlock(tf.keras.Model):
             self.shortcut.add(layers.BatchNormalization())
 
     def call(self, x, training=True):
-        out = layers.ReLU()(self.bn1(self.conv1(x), training=training))
+        out = tf.nn.relu(self.bn1(self.conv1(x), training=training))
         out = self.bn2(self.conv2(out), training=training)
         out += self.shortcut(x, training=training)
-        out = layers.ReLU()(out)
+        out = tf.nn.relu(out)
         return out
 
 class Actor(tf.keras.Model):

@@ -1,0 +1,48 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/alpine
+{
+	"name": "IoTJ-SJH",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"image": "tensorflow/tensorflow:2.13.0-gpu",
+	"runArgs": [
+		"--gpus=all",
+		"--ipc=host"
+	],
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	"postCreateCommand": "bash .devcontainer/install.sh",
+
+	// Configure tool-specific properties.
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"resmon.disk.format": "UsedOutOfTotal",
+				"resmon.show.disk": true
+			},
+			"extensions": [
+				"ms-python.python",
+				"ms-python.pylint",
+				"ms-python.autopep8",
+				"joshbolduc.commitlint",
+				"ms-toolsai.jupyter",
+				"natqe.reload",
+				"shardulm94.trailing-spaces",
+				"codezombiech.gitignore",
+				"mechatroner.rainbow-csv",
+				"mutantdino.resourcemonitor",
+				"ms-toolsai.tensorboard",
+				"ms-toolsai.datawrangler",
+				"github.copilot",
+				"janisdd.vscode-edit-csv"
+			]
+		}
+	},
+	"shutdownAction": "none"
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+}
